@@ -1771,6 +1771,7 @@ async def get_overview_partial(
             "redis_available": redis_available,
             "redis_reachable": redis_reachable,
             "uptime_seconds": uptime_seconds,
+            "mcp_runtime": version_module.mcp_runtime_status_payload(),
         }
 
         return request.app.state.templates.TemplateResponse(request, "overview_partial.html", context)
@@ -4810,7 +4811,7 @@ async def admin_get_all_team_ids(
 async def admin_search_teams(
     q: str = Query("", description="Search query"),
     include_inactive: bool = False,
-    limit: int = Query(settings.pagination_default_page_size, ge=1, le=100, description="Max results"),
+    limit: int = Query(settings.pagination_default_page_size, ge=1, le=settings.pagination_max_page_size, description="Max results"),
     visibility: Optional[str] = Query(None, description="Filter by visibility"),
     db: Session = Depends(get_db),
     user=Depends(get_current_user_with_permissions),
@@ -4882,7 +4883,7 @@ async def admin_search_teams(
 async def admin_teams_partial_html(
     request: Request,
     page: int = Query(1, ge=1, description="Page number"),
-    per_page: int = Query(settings.pagination_default_page_size, ge=1, le=100, description="Items per page"),
+    per_page: int = Query(settings.pagination_default_page_size, ge=1, le=settings.pagination_max_page_size, description="Items per page"),
     include_inactive: bool = Query(False, description="Include inactive teams"),
     visibility: Optional[str] = Query(None, description="Filter by visibility"),
     render: Optional[str] = Query(None, description="Render mode: 'controls' for pagination controls only"),
@@ -5102,7 +5103,7 @@ async def admin_teams_partial_html(
 async def admin_list_teams(
     request: Request,
     page: int = Query(1, ge=1, description="Page number"),
-    per_page: int = Query(settings.pagination_default_page_size, ge=1, le=100, description="Items per page"),
+    per_page: int = Query(settings.pagination_default_page_size, ge=1, le=settings.pagination_max_page_size, description="Items per page"),
     q: Optional[str] = Query(None, description="Search query"),
     db: Session = Depends(get_db),
     user=Depends(get_current_user_with_permissions),
@@ -10068,7 +10069,7 @@ async def admin_tokens_partial_html(
 async def admin_search_tokens(
     q: str = Query("", description="Search query"),
     include_inactive: bool = False,
-    limit: int = Query(settings.pagination_default_page_size, ge=1, le=100, description="Max results"),
+    limit: int = Query(settings.pagination_default_page_size, ge=1, le=settings.pagination_max_page_size, description="Max results"),
     team_id: Optional[str] = Depends(_validated_team_id_param),
     db: Session = Depends(get_db),
     user=Depends(get_current_user_with_permissions),
@@ -17528,7 +17529,7 @@ def _get_latency_heatmap_python(db: Session, cutoff_time: datetime, hours: int, 
 async def get_top_slow_endpoints(
     request: Request,  # pylint: disable=unused-argument
     hours: int = Query(24, ge=1, le=168, description="Time range in hours"),
-    limit: int = Query(10, ge=1, le=100, description="Number of results"),
+    limit: int = Query(10, ge=1, le=settings.pagination_max_page_size, description="Number of results"),
     _user=Depends(get_current_user_with_permissions),
     db: Session = Depends(get_db),
 ):
@@ -17537,7 +17538,7 @@ async def get_top_slow_endpoints(
     Args:
         request: FastAPI request object
         hours: Number of hours to look back (1-168)
-        limit: Number of results to return (1-100)
+        limit: Number of results to return (1-pagination_max_page_size)
         _user: Authenticated user (required by dependency)
         db: Database session for permission checks.
 
@@ -17597,7 +17598,7 @@ async def get_top_slow_endpoints(
 async def get_top_volume_endpoints(
     request: Request,  # pylint: disable=unused-argument
     hours: int = Query(24, ge=1, le=168, description="Time range in hours"),
-    limit: int = Query(10, ge=1, le=100, description="Number of results"),
+    limit: int = Query(10, ge=1, le=settings.pagination_max_page_size, description="Number of results"),
     _user=Depends(get_current_user_with_permissions),
     db: Session = Depends(get_db),
 ):
@@ -17606,7 +17607,7 @@ async def get_top_volume_endpoints(
     Args:
         request: FastAPI request object
         hours: Number of hours to look back (1-168)
-        limit: Number of results to return (1-100)
+        limit: Number of results to return (1-pagination_max_page_size)
         _user: Authenticated user (required by dependency)
         db: Database session for permission checks.
 
@@ -17664,7 +17665,7 @@ async def get_top_volume_endpoints(
 async def get_top_error_endpoints(
     request: Request,  # pylint: disable=unused-argument
     hours: int = Query(24, ge=1, le=168, description="Time range in hours"),
-    limit: int = Query(10, ge=1, le=100, description="Number of results"),
+    limit: int = Query(10, ge=1, le=settings.pagination_max_page_size, description="Number of results"),
     _user=Depends(get_current_user_with_permissions),
     db: Session = Depends(get_db),
 ):
@@ -17673,7 +17674,7 @@ async def get_top_error_endpoints(
     Args:
         request: FastAPI request object
         hours: Number of hours to look back (1-168)
-        limit: Number of results to return (1-100)
+        limit: Number of results to return (1-pagination_max_page_size)
         _user: Authenticated user (required by dependency)
         db: Database session for permission checks.
 
@@ -17783,7 +17784,7 @@ async def get_latency_heatmap(
 async def get_tool_usage(
     request: Request,  # pylint: disable=unused-argument
     hours: int = Query(24, ge=1, le=168, description="Time range in hours"),
-    limit: int = Query(20, ge=5, le=100, description="Number of tools to return"),
+    limit: int = Query(20, ge=5, le=settings.pagination_max_page_size, description="Number of tools to return"),
     _user=Depends(get_current_user_with_permissions),
     db: Session = Depends(get_db),
 ):
@@ -17792,7 +17793,7 @@ async def get_tool_usage(
     Args:
         request: FastAPI request object
         hours: Number of hours to look back (1-168)
-        limit: Maximum number of tools to return (5-100)
+        limit: Maximum number of tools to return (5-pagination_max_page_size)
         _user: Authenticated user (required by dependency)
         db: Database session for permission checks.
 
@@ -17856,7 +17857,7 @@ async def get_tool_usage(
 async def get_tool_performance(
     request: Request,  # pylint: disable=unused-argument
     hours: int = Query(24, ge=1, le=168, description="Time range in hours"),
-    limit: int = Query(20, ge=5, le=100, description="Number of tools to return"),
+    limit: int = Query(20, ge=5, le=settings.pagination_max_page_size, description="Number of tools to return"),
     _user=Depends(get_current_user_with_permissions),
     db: Session = Depends(get_db),
 ):
@@ -17865,7 +17866,7 @@ async def get_tool_performance(
     Args:
         request: FastAPI request object
         hours: Number of hours to look back (1-168)
-        limit: Maximum number of tools to return (5-100)
+        limit: Maximum number of tools to return (5-pagination_max_page_size)
         _user: Authenticated user (required by dependency)
         db: Database session for permission checks.
 
@@ -17908,7 +17909,7 @@ async def get_tool_performance(
 async def get_tool_errors(
     request: Request,  # pylint: disable=unused-argument
     hours: int = Query(24, ge=1, le=168, description="Time range in hours"),
-    limit: int = Query(20, ge=5, le=100, description="Number of tools to return"),
+    limit: int = Query(20, ge=5, le=settings.pagination_max_page_size, description="Number of tools to return"),
     _user=Depends(get_current_user_with_permissions),
     db: Session = Depends(get_db),
 ):
@@ -17917,7 +17918,7 @@ async def get_tool_errors(
     Args:
         request: FastAPI request object
         hours: Number of hours to look back (1-168)
-        limit: Maximum number of tools to return (5-100)
+        limit: Maximum number of tools to return (5-pagination_max_page_size)
         _user: Authenticated user (required by dependency)
         db: Database session for permission checks.
 
@@ -17980,7 +17981,7 @@ async def get_tool_errors(
 async def get_tool_chains(
     request: Request,  # pylint: disable=unused-argument
     hours: int = Query(24, ge=1, le=168, description="Time range in hours"),
-    limit: int = Query(20, ge=5, le=100, description="Number of chains to return"),
+    limit: int = Query(20, ge=5, le=settings.pagination_max_page_size, description="Number of chains to return"),
     _user=Depends(get_current_user_with_permissions),
     db: Session = Depends(get_db),
 ):
@@ -17989,7 +17990,7 @@ async def get_tool_chains(
     Args:
         request: FastAPI request object
         hours: Number of hours to look back (1-168)
-        limit: Maximum number of chains to return (5-100)
+        limit: Maximum number of chains to return (5-pagination_max_page_size)
         _user: Authenticated user (required by dependency)
         db: Database session for permission checks.
 
@@ -18093,7 +18094,7 @@ async def get_tools_partial(
 async def get_prompt_usage(
     request: Request,  # pylint: disable=unused-argument
     hours: int = Query(24, ge=1, le=168, description="Time range in hours"),
-    limit: int = Query(20, ge=5, le=100, description="Number of prompts to return"),
+    limit: int = Query(20, ge=5, le=settings.pagination_max_page_size, description="Number of prompts to return"),
     _user=Depends(get_current_user_with_permissions),
     db: Session = Depends(get_db),
 ):
@@ -18102,7 +18103,7 @@ async def get_prompt_usage(
     Args:
         request: FastAPI request object
         hours: Number of hours to look back (1-168)
-        limit: Maximum number of prompts to return (5-100)
+        limit: Maximum number of prompts to return (5-pagination_max_page_size)
         _user: Authenticated user (required by dependency)
         db: Database session for permission checks.
 
@@ -18166,7 +18167,7 @@ async def get_prompt_usage(
 async def get_prompt_performance(
     request: Request,  # pylint: disable=unused-argument
     hours: int = Query(24, ge=1, le=168, description="Time range in hours"),
-    limit: int = Query(20, ge=5, le=100, description="Number of prompts to return"),
+    limit: int = Query(20, ge=5, le=settings.pagination_max_page_size, description="Number of prompts to return"),
     _user=Depends(get_current_user_with_permissions),
     db: Session = Depends(get_db),
 ):
@@ -18175,7 +18176,7 @@ async def get_prompt_performance(
     Args:
         request: FastAPI request object
         hours: Number of hours to look back (1-168)
-        limit: Maximum number of prompts to return (5-100)
+        limit: Maximum number of prompts to return (5-pagination_max_page_size)
         _user: Authenticated user (required by dependency)
         db: Database session for permission checks.
 
@@ -18315,7 +18316,7 @@ async def get_prompts_partial(
 async def get_resource_usage(
     request: Request,  # pylint: disable=unused-argument
     hours: int = Query(24, ge=1, le=168, description="Time range in hours"),
-    limit: int = Query(20, ge=5, le=100, description="Number of resources to return"),
+    limit: int = Query(20, ge=5, le=settings.pagination_max_page_size, description="Number of resources to return"),
     _user=Depends(get_current_user_with_permissions),
     db: Session = Depends(get_db),
 ):
@@ -18324,7 +18325,7 @@ async def get_resource_usage(
     Args:
         request: FastAPI request object
         hours: Number of hours to look back (1-168)
-        limit: Maximum number of resources to return (5-100)
+        limit: Maximum number of resources to return (5-pagination_max_page_size)
         _user: Authenticated user (required by dependency)
         db: Database session for permission checks.
 
@@ -18388,7 +18389,7 @@ async def get_resource_usage(
 async def get_resource_performance(
     request: Request,  # pylint: disable=unused-argument
     hours: int = Query(24, ge=1, le=168, description="Time range in hours"),
-    limit: int = Query(20, ge=5, le=100, description="Number of resources to return"),
+    limit: int = Query(20, ge=5, le=settings.pagination_max_page_size, description="Number of resources to return"),
     _user=Depends(get_current_user_with_permissions),
     db: Session = Depends(get_db),
 ):
@@ -18397,7 +18398,7 @@ async def get_resource_performance(
     Args:
         request: FastAPI request object
         hours: Number of hours to look back (1-168)
-        limit: Maximum number of resources to return (5-100)
+        limit: Maximum number of resources to return (5-pagination_max_page_size)
         _user: Authenticated user (required by dependency)
         db: Database session for permission checks.
 

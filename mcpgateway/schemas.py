@@ -295,6 +295,14 @@ class MetricsResponse(BaseModelWithConfigDict):
 
     @model_serializer(mode="wrap")
     def _exclude_none_a2a(self, handler):
+        """Omit the A2A metrics field when that feature is disabled.
+
+        Args:
+            handler: Pydantic serializer callback for the wrapped model.
+
+        Returns:
+            Dict[str, Any]: Serialized metrics payload without empty A2A fields.
+        """
         result = handler(self)
         if self.a2a_agents is None:
             result.pop("a2aAgents", None)
@@ -311,6 +319,7 @@ class JsonPathModifier(BaseModelWithConfigDict):
     Provides the structure for parsing JSONPath queries and optional mapping.
     """
 
+    model_config = ConfigDict(extra="forbid")  # ← rejects unknown fields
     jsonpath: Optional[str] = Field(None, description="JSONPath expression for querying JSON data.")
     mapping: Optional[Dict[str, str]] = Field(None, description="Mapping of fields from original data to output.")
 
