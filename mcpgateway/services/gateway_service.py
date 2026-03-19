@@ -56,6 +56,7 @@ from urllib.parse import urlparse, urlunparse
 import uuid
 
 # Third-Party
+import anyio
 from filelock import FileLock, Timeout
 import httpx
 from mcp import ClientSession
@@ -1572,7 +1573,7 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
         is_public_only = token_teams is not None and len(token_teams) == 0
         use_cache = cursor is None and user_email is None and page is None and is_public_only
         if use_cache:
-            filters_hash = cache.hash_filters(include_inactive=include_inactive, tags=sorted(tags) if tags else None)
+            filters_hash = cache.hash_filters(include_inactive=include_inactive, tags=sorted(tags) if tags else None, visibility=visibility)
             cached = await cache.get("gateways", filters_hash)
             if cached is not None:
                 # Reconstruct GatewayRead objects from cached dicts
@@ -3336,10 +3337,8 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
                                 # Optional explicit RPC verification (off by default for performance).
                                 # Pool's internal staleness check handles health via _validate_session.
                                 if settings.mcp_session_pool_explicit_health_rpc:
-                                    await asyncio.wait_for(
-                                        pooled.session.list_tools(),
-                                        timeout=settings.health_check_timeout,
-                                    )
+                                    with anyio.fail_after(settings.health_check_timeout):
+                                        await pooled.session.list_tools()
                         else:
                             async with streamablehttp_client(url=gateway_url, headers=headers, timeout=settings.health_check_timeout, httpx_client_factory=get_httpx_client_factory) as (
                                 read_stream,

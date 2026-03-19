@@ -3516,6 +3516,7 @@ async def list_servers(
     include_pagination: bool = Query(False, description="Include cursor pagination metadata in response"),
     limit: Optional[int] = Query(None, ge=0, description="Maximum number of servers to return"),
     include_inactive: bool = False,
+    include_metrics: bool = False,
     tags: Optional[str] = None,
     team_id: Optional[str] = None,
     visibility: Optional[str] = None,
@@ -3531,6 +3532,7 @@ async def list_servers(
         include_pagination (bool): Include cursor pagination metadata in response.
         limit (Optional[int]): Maximum number of servers to return.
         include_inactive (bool): Whether to include inactive servers in the response.
+        include_metrics (bool): Whether to include aggregated metrics in the response.
         tags (Optional[str]): Comma-separated list of tags to filter by.
         team_id (Optional[str]): Filter by specific team ID.
         visibility (Optional[str]): Filter by visibility (private, team, public).
@@ -3579,6 +3581,7 @@ async def list_servers(
         cursor=cursor,
         limit=limit,
         include_inactive=include_inactive,
+        include_metrics=include_metrics,
         tags=tags_list,
         user_email=None if is_admin_bypass else user_email,  # Admin bypass: no user filtering
         team_id=team_id,
@@ -4108,6 +4111,7 @@ async def server_get_resources(
     request: Request,
     server_id: str,
     include_inactive: bool = False,
+    include_metrics: bool = False,
     db: Session = Depends(get_db),
     user=Depends(get_current_user_with_permissions),
 ) -> List[Dict[str, Any]]:
@@ -4122,6 +4126,7 @@ async def server_get_resources(
         request (Request): FastAPI request object.
         server_id (str): ID of the server
         include_inactive (bool): Whether to include inactive resources in the results.
+        include_metrics (bool): Whether to include aggregated metrics in the results.
         db (Session): Database session dependency.
         user (str): Authenticated user dependency.
 
@@ -4137,7 +4142,9 @@ async def server_get_resources(
         token_teams = None  # Admin unrestricted
     elif token_teams is None:
         token_teams = []  # Non-admin without teams = public-only (secure default)
-    resources = await resource_service.list_server_resources(db, server_id=server_id, include_inactive=include_inactive, user_email=user_email, token_teams=token_teams)
+    resources = await resource_service.list_server_resources(
+        db, server_id=server_id, include_inactive=include_inactive, include_metrics=include_metrics, user_email=user_email, token_teams=token_teams
+    )
     return [resource.model_dump(by_alias=True) for resource in resources]
 
 
@@ -4147,6 +4154,7 @@ async def server_get_prompts(
     request: Request,
     server_id: str,
     include_inactive: bool = False,
+    include_metrics: bool = False,
     db: Session = Depends(get_db),
     user=Depends(get_current_user_with_permissions),
 ) -> List[Dict[str, Any]]:
@@ -4161,6 +4169,7 @@ async def server_get_prompts(
         request (Request): FastAPI request object.
         server_id (str): ID of the server
         include_inactive (bool): Whether to include inactive prompts in the results.
+        include_metrics (bool): Whether to include aggregated metrics in the results.
         db (Session): Database session dependency.
         user (str): Authenticated user dependency.
 
@@ -4176,7 +4185,7 @@ async def server_get_prompts(
         token_teams = None  # Admin unrestricted
     elif token_teams is None:
         token_teams = []  # Non-admin without teams = public-only (secure default)
-    prompts = await prompt_service.list_server_prompts(db, server_id=server_id, include_inactive=include_inactive, user_email=user_email, token_teams=token_teams)
+    prompts = await prompt_service.list_server_prompts(db, server_id=server_id, include_inactive=include_inactive, include_metrics=include_metrics, user_email=user_email, token_teams=token_teams)
     return [prompt.model_dump(by_alias=True) for prompt in prompts]
 
 
@@ -10443,10 +10452,10 @@ async def export_selective_configuration(
 @require_permission("admin.import")
 async def import_configuration(
     import_data: Dict[str, Any] = Body(...),
-    conflict_strategy: str = "update",
-    dry_run: bool = False,
-    rekey_secret: Optional[str] = None,
-    selected_entities: Optional[Dict[str, List[str]]] = None,
+    conflict_strategy: str = Body("update"),
+    dry_run: bool = Body(False),
+    rekey_secret: Optional[str] = Body(None),
+    selected_entities: Optional[Dict[str, List[str]]] = Body(None),
     db: Session = Depends(get_db),
     user=Depends(get_current_user_with_permissions),
 ) -> Dict[str, Any]:
@@ -10469,6 +10478,9 @@ async def import_configuration(
         HTTPException: If import fails or validation errors occur
     """
     try:
+        if not import_data:
+            raise HTTPException(status_code=400, detail="Missing 'import_data' in request body")
+
         logger.info(f"User {SecurityValidator.sanitize_log_message(str(user))} requested configuration import (dry_run={dry_run})")
 
         # Validate conflict strategy
@@ -10492,6 +10504,8 @@ async def import_configuration(
 
         return import_status.to_dict()
 
+    except HTTPException:
+        raise
     except ImportValidationError as e:
         logger.error(f"Import validation failed for user {SecurityValidator.sanitize_log_message(str(user))}: {str(e)}")
         raise HTTPException(status_code=422, detail=f"Validation error: {str(e)}")

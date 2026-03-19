@@ -619,6 +619,45 @@ class TestInternalTrustedMcpTransportBridge:
         assert auth_context["is_authenticated"] is True
 
     @pytest.mark.asyncio
+    async def test_run_internal_mcp_authentication_runs_pre_request_hooks(self, monkeypatch):
+        """HTTP_PRE_REQUEST plugin hooks should transform headers before auth runs."""
+        # First-Party
+        import mcpgateway.main as main_mod
+        from mcpgateway.plugins.framework import HttpHookType
+
+        async def _fake_streamable_http_auth(_scope, _receive, _send):
+            user_context_var.set({"email": "hook-user@example.com", "teams": [], "is_authenticated": True})
+            return True
+
+        monkeypatch.setattr("mcpgateway.main.settings.email_auth_enabled", False)
+        monkeypatch.setattr("mcpgateway.main.streamable_http_auth", _fake_streamable_http_auth)
+
+        mock_pm = MagicMock()
+        mock_pm.has_hooks_for = MagicMock(side_effect=lambda ht: ht == HttpHookType.HTTP_PRE_REQUEST)
+        monkeypatch.setattr(main_mod, "plugin_manager", mock_pm)
+
+        transformed_headers = {"authorization": "Bearer exchanged-token", "x-injected": "value"}
+        original_headers = {"authorization": "Bearer original-token"}
+
+        mock_run_hooks = AsyncMock(return_value=(transformed_headers, None, None))
+        monkeypatch.setattr("mcpgateway.main.run_pre_request_hooks", mock_run_hooks)
+
+        error_response, auth_context = await _run_internal_mcp_authentication(
+            method="POST",
+            path="/mcp",
+            query_string="",
+            headers=original_headers,
+            client_ip="203.0.113.10",
+        )
+
+        assert error_response is None
+        assert auth_context["email"] == "hook-user@example.com"
+        mock_pm.has_hooks_for.assert_called()
+        # Verify run_pre_request_hooks was actually invoked with original headers
+        mock_run_hooks.assert_awaited_once()
+        assert mock_run_hooks.call_args.kwargs["headers"] == original_headers
+
+    @pytest.mark.asyncio
     async def test_handle_internal_mcp_authenticate_returns_auth_context(self, monkeypatch):
         """Trusted Rust authenticate requests should return the derived auth context."""
         request = MagicMock(spec=Request)
@@ -9160,15 +9199,22 @@ class TestExportImportEndpoints:
             await main_mod.export_selective_configuration.__wrapped__(request, {"tools": ["tool-1"]}, include_dependencies=False, db=MagicMock(), user={"email": "user@example.com"})
         assert excinfo.value.status_code == 500
 
+    async def test_import_configuration_missing_import_data(self):
+        # First-Party
+        import mcpgateway.main as main_mod
+
+        with pytest.raises(HTTPException) as excinfo:
+            await main_mod.import_configuration.__wrapped__(import_data={}, conflict_strategy="update", db=MagicMock(), user={"email": "user@example.com"})
+        assert excinfo.value.status_code == 400
+        assert "import_data" in str(excinfo.value.detail).lower()
+
     async def test_import_configuration_invalid_strategy(self):
         # First-Party
         import mcpgateway.main as main_mod
 
         with pytest.raises(HTTPException) as excinfo:
-            # NOTE: main.py raises HTTPException(400) for invalid strategies, but
-            # immediately wraps it in the outer Exception handler (500).
-            await main_mod.import_configuration.__wrapped__(import_data={}, conflict_strategy="invalid", db=MagicMock(), user={"email": "user@example.com"})
-        assert excinfo.value.status_code == 500
+            await main_mod.import_configuration.__wrapped__(import_data={"version": "1"}, conflict_strategy="invalid", db=MagicMock(), user={"email": "user@example.com"})
+        assert excinfo.value.status_code == 400
         assert "Invalid conflict strategy" in str(excinfo.value.detail)
 
     async def test_import_configuration_success(self):
@@ -9195,7 +9241,7 @@ class TestExportImportEndpoints:
         svc.import_configuration = AsyncMock(return_value=request_import_status)
         monkeypatch.setattr(main_mod, "import_service", svc)
 
-        # Cover username=None branch by bypassing wrapper and using non-dict user.
+        # Cover username=None branch by using non-dict user
         result = await main_mod.import_configuration.__wrapped__(import_data={"tools": []}, conflict_strategy="update", db=MagicMock(), user="basic-user")
         assert result["status"] == "ok"
 
@@ -10057,6 +10103,7 @@ class TestRemainingCoverageGaps:
     async def test_list_tools_and_get_tool_jsonpath_modifier(self, monkeypatch):
         # Third-Party
         import orjson
+
 
         # First-Party
         import mcpgateway.main as main_mod
