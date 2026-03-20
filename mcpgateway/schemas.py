@@ -3368,6 +3368,9 @@ class GatewayRead(BaseModelWithConfigDict):
     # Gateway mode configuration
     gateway_mode: str = Field(default="cache", description="Gateway mode: 'cache' (database caching, default) or 'direct_proxy' (pass-through mode with no caching)")
 
+    # Tool count (populated from the tools relationship; 0 when not loaded)
+    tool_count: int = Field(default=0, description="Number of tools registered for this gateway")
+
     @model_validator(mode="before")
     @classmethod
     def _mask_query_param_auth(cls, data: Any) -> Any:

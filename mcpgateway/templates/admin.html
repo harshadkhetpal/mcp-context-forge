@@ -11088,12 +11088,20 @@ class="fixed z-50 inset-0 bg-gray-800 bg-opacity-75 flex items-center justify-ce
                     <div
                       class="p-4 bg-white dark:bg-gray-800 rounded-lg shadow-lg border border-gray-600"
                     >
-                      <label
-                        for="edit-server-tools"
-                        class="block text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2"
-                      >
-                        Associated Tools
-                      </label>
+                      <div class="flex items-center justify-between mb-2">
+                        <label
+                          for="edit-server-tools"
+                          class="block text-sm font-semibold text-gray-700 dark:text-gray-300"
+                        >
+                          Associated Tools
+                        </label>
+                        <button
+                          type="button"
+                          onclick="refreshToolsForSelectedGateways(this)"
+                          class="px-2 py-1 text-xs font-medium text-green-700 dark:text-green-400 border border-green-600 dark:border-green-500 rounded-md hover:bg-green-50 dark:hover:bg-green-900/20 transition-colors"
+                          x-tooltip="'Re-fetch tools from selected MCP gateways and reload this list'"
+                        >Refresh from MCPs</button>
+                      </div>
                        <input
                         type="text"
                         id="searchEditTools"

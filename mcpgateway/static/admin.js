@@ -20750,6 +20750,123 @@ async function fetchToolsForGateway(gatewayId, gatewayName) {
 // Expose fetch tools function to global scope
 window.fetchToolsForGateway = fetchToolsForGateway;
 
+/**
+ * Refresh (or first-time fetch) tools for a gateway via the unified refresh endpoint.
+ * Works for all auth types. Shows a toast with delta counts on success.
+ *
+ * @param {string} gatewayId - ID of the gateway
+ * @param {string} gatewayName - Display name for toast messages
+ * @param {HTMLElement|null} buttonEl - Optional button element for loading-state feedback
+ */
+async function refreshGatewayTools(gatewayId, gatewayName, buttonEl) {
+    const origText = buttonEl ? buttonEl.textContent : "";
+    if (buttonEl) {
+        buttonEl.disabled = true;
+        buttonEl.textContent = "⏳ Refreshing...";
+    }
+
+    try {
+        const response = await fetch(`${window.ROOT_PATH}/gateways/${gatewayId}/tools/refresh`, {
+            method: "POST",
+            credentials: "include",
+            headers: { Accept: "application/json" },
+        });
+
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.detail || data.message || "Refresh failed");
+        }
+
+        // Check if the refresh operation itself succeeded (even if HTTP 200)
+        if (data.success === false || data.error) {
+            throw new Error(data.error || "Refresh failed on the server");
+        }
+
+        showSuccessMessage(
+            `${gatewayName}: ${data.toolsAdded ?? 0} added, ${data.toolsUpdated ?? 0} updated, ${data.toolsRemoved ?? 0} removed`,
+        );
+
+        // Reload the gateways partial table via HTMX to reflect updated tool counts / button labels
+        htmx.ajax("GET", `${window.ROOT_PATH}/admin/gateways/partial`, {
+            target: "#gateways-table",
+            swap: "outerHTML",
+        });
+    } catch (err) {
+        console.error("refreshGatewayTools error:", err);
+        showErrorMessage(`Failed to refresh tools for ${gatewayName}: ${err.message}`);
+        if (buttonEl) {
+            buttonEl.disabled = false;
+            buttonEl.textContent = origText;
+        }
+    }
+}
+
+window.refreshGatewayTools = refreshGatewayTools;
+
+/**
+ * Refresh tools for all currently selected gateways in the virtual server edit form.
+ * After completion, triggers an HTMX reload of the tools selector list.
+ *
+ * @param {HTMLElement} buttonEl - The button element clicked
+ */
+async function refreshToolsForSelectedGateways(buttonEl) {
+    const gwIds =
+        typeof getSelectedGatewayIds === "function" ? getSelectedGatewayIds() : [];
+    if (!gwIds.length) {
+        showErrorMessage("Select at least one MCP gateway first.");
+        return;
+    }
+
+    const origText = buttonEl.textContent;
+    buttonEl.disabled = true;
+    buttonEl.textContent = "⏳ Refreshing...";
+
+    let added = 0,
+        updated = 0,
+        removed = 0,
+        failed = 0;
+
+    await Promise.allSettled(
+        gwIds.map(async (gid) => {
+            try {
+                const res = await fetch(`${window.ROOT_PATH}/gateways/${gid}/tools/refresh`, {
+                    method: "POST",
+                    credentials: "include",
+                    headers: { Accept: "application/json" },
+                });
+                const data = await res.json();
+                if (res.ok && data.success !== false) {
+                    added += data.toolsAdded ?? 0;
+                    updated += data.toolsUpdated ?? 0;
+                    removed += data.toolsRemoved ?? 0;
+                } else {
+                    failed++;
+                }
+            } catch (_) {
+                failed++;
+            }
+        }),
+    );
+
+    buttonEl.disabled = false;
+    buttonEl.textContent = origText;
+
+    const msg = `${added} added, ${updated} updated, ${removed} removed`;
+    if (failed > 0) {
+        showErrorMessage(`Refresh completed with ${failed} error(s). ${msg}`);
+    } else {
+        showSuccessMessage(`Tools refreshed: ${msg}`);
+    }
+
+    // Reload the tools selector via HTMX to pick up newly discovered tools
+    const container = document.getElementById("edit-server-tools");
+    if (container) {
+        htmx.trigger(container, "load");
+    }
+}
+
+window.refreshToolsForSelectedGateways = refreshToolsForSelectedGateways;
+
 console.log("🛡️ ContextForge AI Gateway admin.js initialized");
 
 // ===================================================================
