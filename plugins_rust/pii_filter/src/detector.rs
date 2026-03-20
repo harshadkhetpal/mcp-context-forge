@@ -98,8 +98,6 @@ impl PIIDetectorRust {
     /// * `detect_driver_license` (bool): Detect driver's license numbers
     /// * `detect_bank_account` (bool): Detect bank account numbers
     /// * `detect_medical_record` (bool): Detect medical record numbers
-    /// * `detect_aws_keys` (bool): Detect AWS access keys
-    /// * `detect_api_keys` (bool): Detect API keys
     /// * `default_mask_strategy` (str): "redact", "partial", "hash", "tokenize", "remove"
     /// * `redaction_text` (str): Text to use for redaction (default: "\[REDACTED\]")
     /// * `block_on_detection` (bool): Whether to block on detection
@@ -489,8 +487,6 @@ impl PIIDetectorRust {
             "driver_license" => Ok(PIIType::DriverLicense),
             "bank_account" => Ok(PIIType::BankAccount),
             "medical_record" => Ok(PIIType::MedicalRecord),
-            "aws_key" => Ok(PIIType::AwsKey),
-            "api_key" => Ok(PIIType::ApiKey),
             "custom" => Ok(PIIType::Custom),
             _ => Err(()),
         }

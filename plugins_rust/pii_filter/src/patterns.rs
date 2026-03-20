@@ -172,31 +172,6 @@ static MEDICAL_RECORD_PATTERNS: Lazy<Vec<PatternDef>> = Lazy::new(|| {
     )]
 });
 
-// AWS key patterns
-static AWS_KEY_PATTERNS: Lazy<Vec<PatternDef>> = Lazy::new(|| {
-    vec![
-        (
-            r"\bAKIA[0-9A-Z]{16}\b",
-            "AWS Access Key ID",
-            MaskingStrategy::Redact,
-        ),
-        (
-            r"\b[A-Za-z0-9/+=]{40}\b",
-            "AWS Secret Access Key",
-            MaskingStrategy::Redact,
-        ),
-    ]
-});
-
-// API key patterns
-static API_KEY_PATTERNS: Lazy<Vec<PatternDef>> = Lazy::new(|| {
-    vec![(
-        r#"\b(?:api[_-]?key|apikey|api_token|access[_-]?token)[:\s]+['"]?[A-Za-z0-9\-_]{20,}['"]?\b"#,
-        "Generic API key",
-        MaskingStrategy::Redact,
-    )]
-});
-
 /// Compile patterns based on configuration
 pub fn compile_patterns(config: &PIIConfig) -> Result<CompiledPatterns, String> {
     let mut pattern_strings = Vec::new();
@@ -264,8 +239,6 @@ pub fn compile_patterns(config: &PIIConfig) -> Result<CompiledPatterns, String> 
         PIIType::MedicalRecord,
         &*MEDICAL_RECORD_PATTERNS
     );
-    add_patterns!(config.detect_aws_keys, PIIType::AwsKey, &*AWS_KEY_PATTERNS);
-    add_patterns!(config.detect_api_keys, PIIType::ApiKey, &*API_KEY_PATTERNS);
 
     // Add custom patterns
     for custom in &config.custom_patterns {

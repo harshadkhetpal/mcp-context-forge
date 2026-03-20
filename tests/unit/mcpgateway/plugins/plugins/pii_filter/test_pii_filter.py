@@ -467,38 +467,14 @@ class TestPIIDetectorParametric:
         detection_keys = normalize_detection_keys(detections)
         assert "date_of_birth" in detection_keys
 
-    # AWS Key Detection Tests
-    @pytest.mark.parametrize(
-        "text,should_detect",
-        [
-            ("Access key: AKIAIOSFODNN7EXAMPLE", True),
-            ("AWS_KEY=AKIAIOSFODNN7EXAMPLE", True),
-            ("AKIA1234567890123456", True),
-            ("SECRET=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", True),
-            ("No key here", False),
-        ],
-    )
-    def test_aws_key_detection(self, detector_class, text, should_detect):
-        """Test AWS key detection."""
-        config = PIIFilterConfig(detect_aws_keys=True)
-        detector = detector_class(config)
+    def test_secret_like_values_are_not_pii(self, detector):
+        """Secret-style tokens belong to the secrets detection plugin, not PII filter."""
+        text = "AWS_KEY=AKIAIOSFODNN7EXAMPLE X-API-Key: test12345678901234567890"  # gitleaks:allow
         detections = detector.detect(text)
 
         detection_keys = normalize_detection_keys(detections)
-
-        if should_detect:
-            assert "aws_key" in detection_keys
-        else:
-            assert "aws_key" not in detection_keys
-
-    # API Key Detection Tests
-    def test_detect_api_key_header(self, detector):
-        """Test API key in header format."""
-        text = "X-API-Key: test12345678901234567890"  # gitleaks:allow
-        detections = detector.detect(text)
-
-        detection_keys = normalize_detection_keys(detections)
-        assert "api_key" in detection_keys
+        assert "aws_key" not in detection_keys
+        assert "api_key" not in detection_keys
 
     # Multiple PII Types Tests
     def test_detect_multiple_pii_types(self, detector):
@@ -791,7 +767,6 @@ class TestPIIFilterPlugin:
                 "detect_email": True,
                 "detect_phone": True,
                 "detect_ip_address": True,
-                "detect_aws_keys": True,
                 "default_mask_strategy": "partial",
                 "block_on_detection": False,
                 "log_detections": True,
@@ -848,7 +823,7 @@ class TestPIIFilterPlugin:
         # Create messages with PII
         messages = [
             Message(role=Role.USER, content=TextContent(type="text", text="Contact me at john@example.com or 555-123-4567")),
-            Message(role=Role.ASSISTANT, content=TextContent(type="text", text="I'll reach you at the provided contact: AKIAIOSFODNN7EXAMPLE")),
+            Message(role=Role.ASSISTANT, content=TextContent(type="text", text="I'll reach you at jane.doe@example.com once the ticket is processed")),
         ]
 
         payload = PromptPosthookPayload(prompt_id="test_prompt", result=PromptResult(messages=messages))
@@ -862,7 +837,7 @@ class TestPIIFilterPlugin:
 
         assert "john@example.com" not in user_msg
         assert "555-123-4567" not in user_msg
-        assert "AKIAIOSFODNN7EXAMPLE" not in assistant_msg
+        assert "jane.doe@example.com" not in assistant_msg
 
         # Check metadata
         assert "pii_detections" in context.metadata
