@@ -514,7 +514,7 @@ class TestGatewayActions:
     """Test cases for gateway row actions."""
 
     def test_gateway_row_actions_visible(self, gateways_page: GatewaysPage):
-        """Test that all gateway row action buttons are visible."""
+        """Test that all gateway row action buttons are visible in overflow menu."""
         gateways_page.navigate_to_gateways_tab()
         gateways_page.wait_for_gateways_table_loaded()
 
@@ -525,18 +525,28 @@ class TestGatewayActions:
         # Get first gateway row
         first_row = gateways_page.get_gateway_row(0)
 
-        # Verify all action buttons exist
-        expect(first_row.locator('button:has-text("Test")')).to_be_visible()
-        expect(first_row.locator('button:has-text("View")')).to_be_visible()
-        expect(first_row.locator('button:has-text("Edit")')).to_be_visible()
+        # Open overflow menu
+        menu_btn = first_row.locator('button[aria-expanded]')
+        expect(menu_btn).to_be_visible()
+        menu_btn.click()
+
+        # Wait for dropdown to be visible
+        dropdown = first_row.locator('div[x-show="menuOpen"]')
+        dropdown.wait_for(state="visible", timeout=5000)
+        gateways_page.page.wait_for_timeout(150)  # Alpine.js transition
+
+        # Verify all action buttons exist in dropdown
+        expect(dropdown.locator('button:has-text("Test")')).to_be_visible()
+        expect(dropdown.locator('button:has-text("View")')).to_be_visible()
+        expect(dropdown.locator('button:has-text("Edit")')).to_be_visible()
 
         # Either Activate or Deactivate should be visible
-        activate_btn = first_row.locator('button:has-text("Activate")')
-        deactivate_btn = first_row.locator('button:has-text("Deactivate")')
+        activate_btn = dropdown.locator('button:has-text("Activate")')
+        deactivate_btn = dropdown.locator('button:has-text("Deactivate")')
         assert activate_btn.is_visible() or deactivate_btn.is_visible()
 
         # Delete button should be visible
-        expect(first_row.locator('button:has-text("Delete")')).to_be_visible()
+        expect(dropdown.locator('button:has-text("Delete")')).to_be_visible()
 
     def test_test_button_click(self, gateways_page: GatewaysPage):
         """Test clicking the Test button for a gateway."""

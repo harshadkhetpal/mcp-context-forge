@@ -162,7 +162,7 @@ def _click_add_gateway_btn(root) -> None:
 
 
 def _get_delete_gateway_btn(root, gw_id: str):
-    """Locate and return the delete button for a gateway. Waits for HTMX table load."""
+    """Locate and return the delete button for a gateway by opening overflow menu. Waits for HTMX table load."""
     # The gateways table body is loaded via HTMX partial — wait for it first.
     # FrameLocator (used in iframe tests) lacks wait_for_selector, so guard.
     if hasattr(root, "wait_for_selector"):
@@ -170,9 +170,23 @@ def _get_delete_gateway_btn(root, gw_id: str):
             root.wait_for_selector("#gateways-table-body", state="attached", timeout=30000)
         except PlaywrightTimeoutError:
             pass
-    delete_form = root.locator(f'form[action*="/gateways/{gw_id}/delete"]').first
+    
+    # Open overflow menu for this gateway
+    gateway_row = root.locator(f'tr[id="gateway-row-{gw_id}"]')
+    menu_btn = gateway_row.locator('button[aria-expanded]')
+    if menu_btn.count() == 0:
+        pytest.skip("Overflow menu button for gateway not visible — skipping.")
+    
+    menu_btn.click()
+    
+    # Wait for dropdown to be visible
+    dropdown = gateway_row.locator('div[x-show="menuOpen"]')
+    dropdown.wait_for(state="visible", timeout=5000)
+    
+    # Find delete button inside dropdown
+    delete_form = gateway_row.locator('form[action*="/delete"]')
     if delete_form.count() == 0:
-        pytest.skip("Delete form for created gateway not visible in UI — skipping.")
+        pytest.skip("Delete form for created gateway not visible in overflow menu — skipping.")
     return delete_form.locator('button[type="submit"]').first
 
 
@@ -306,9 +320,20 @@ class TestAdminUrlContextPreservation:
             page.wait_for_load_state("domcontentloaded")
             _wait_for_admin_content(page)
 
-            edit_btn = page.locator(f"button[onclick*=\"editGateway('{gw_id}')\"]").first
-            if edit_btn.count() == 0:
-                pytest.skip("Edit button for created gateway not visible — skipping.")
+            # Open overflow menu for this gateway, then click edit
+            gateway_row = page.locator(f'tr[id="gateway-row-{gw_id}"]')
+            menu_btn = gateway_row.locator('button[aria-expanded]')
+            if menu_btn.count() == 0:
+                pytest.skip("Overflow menu button for gateway not visible — skipping.")
+            
+            menu_btn.click()
+            
+            # Wait for dropdown to be visible
+            dropdown = gateway_row.locator('div[x-show="menuOpen"]')
+            dropdown.wait_for(state="visible", timeout=5000)
+            
+            # Click edit button inside dropdown
+            edit_btn = gateway_row.locator('button:has-text("Edit")')
             edit_btn.click()
 
             edit_form = page.locator("#edit-gateway-form")
@@ -533,12 +558,20 @@ class TestAdminProxyUrlContext:
             page.wait_for_load_state("domcontentloaded")
             _wait_for_admin_content(page)
 
-            # Click the edit button in the DOM rather than calling editGateway()
-            # via evaluate — the 1.2 MB admin.js may not finish executing before
-            # domcontentloaded fires in the proxy context.
-            edit_btn = page.locator(f"button[onclick*=\"editGateway('{gw_id}')\"]").first
-            if edit_btn.count() == 0:
-                pytest.skip("Edit button for created gateway not visible — skipping.")
+            # Open overflow menu for this gateway, then click edit
+            gateway_row = page.locator(f'tr[id="gateway-row-{gw_id}"]')
+            menu_btn = gateway_row.locator('button[aria-expanded]')
+            if menu_btn.count() == 0:
+                pytest.skip("Overflow menu button for gateway not visible — skipping.")
+            
+            menu_btn.click()
+            
+            # Wait for dropdown to be visible
+            dropdown = gateway_row.locator('div[x-show="menuOpen"]')
+            dropdown.wait_for(state="visible", timeout=5000)
+            
+            # Click edit button inside dropdown
+            edit_btn = gateway_row.locator('button:has-text("Edit")')
             edit_btn.click()
 
             edit_form = page.locator("#edit-gateway-form")
@@ -833,11 +866,20 @@ class TestAdminIframeContext:
         frame_obj = self._frame(page)
 
         try:
-            # Click the edit button in the DOM rather than calling editGateway()
-            # via evaluate — admin.js may not finish executing in iframe context.
-            edit_btn = frame.locator(f"button[onclick*=\"editGateway('{gw_id}')\"]").first
-            if edit_btn.count() == 0:
-                pytest.skip("Edit button for created gateway not visible in iframe — skipping.")
+            # Open overflow menu for this gateway, then click edit
+            gateway_row = frame.locator(f'tr[id="gateway-row-{gw_id}"]')
+            menu_btn = gateway_row.locator('button[aria-expanded]')
+            if menu_btn.count() == 0:
+                pytest.skip("Overflow menu button for gateway not visible in iframe — skipping.")
+            
+            menu_btn.click()
+            
+            # Wait for dropdown to be visible
+            dropdown = gateway_row.locator('div[x-show="menuOpen"]')
+            dropdown.wait_for(state="visible", timeout=5000)
+            
+            # Click edit button inside dropdown
+            edit_btn = gateway_row.locator('button:has-text("Edit")')
             edit_btn.click()
 
             edit_form = frame.locator("#edit-gateway-form")

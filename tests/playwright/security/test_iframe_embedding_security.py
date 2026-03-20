@@ -727,13 +727,28 @@ class TestIframeFormSubmission:
             self._reload_iframe(page, frame)
             self._navigate_to_gateways_tab(page, frame)
 
-            # Click the edit button for this specific gateway
-            edit_btn = frame.locator(f"button[onclick*=\"editGateway('{gw_id}')\"]")
+            # Open overflow menu for this gateway, then click edit
+            gateway_row = frame.locator(f'tr[id="gateway-row-{gw_id}"]')
+            menu_btn = gateway_row.locator('button[aria-expanded]')
             try:
-                edit_btn.wait_for(state="visible", timeout=15000)
+                menu_btn.wait_for(state="visible", timeout=15000)
             except PlaywrightTimeoutError:
-                pytest.skip(f"Edit button for gateway {gw_id} not visible")
-
+                pytest.skip(f"Overflow menu button for gateway {gw_id} not visible")
+            
+            menu_btn.click()
+            
+            # Wait for dropdown to be visible and Alpine.js transition to complete
+            dropdown = gateway_row.locator('div[x-show="menuOpen"]')
+            try:
+                dropdown.wait_for(state="visible", timeout=5000)
+            except PlaywrightTimeoutError:
+                pytest.skip("Overflow menu dropdown did not become visible")
+            
+            # Additional wait for Alpine.js transition animation (100ms enter duration)
+            page.wait_for_timeout(150)
+            
+            # Click edit button inside dropdown (scope to dropdown to avoid strict mode violation)
+            edit_btn = dropdown.locator('button:has-text("Edit")')
             edit_btn.click()
 
             # Wait for edit modal to appear
@@ -776,14 +791,29 @@ class TestIframeFormSubmission:
             # Auto-accept confirmation dialogs on the HOST page
             page.on("dialog", lambda d: d.accept())
 
-            # Click delete button for this gateway (use .first — responsive layouts
-            # may render both a compact and full-width row for the same gateway)
-            delete_btn = frame.locator(f'form[action*="/gateways/{gw_id}/delete"] button[type="submit"]').first
+            # Open overflow menu for this gateway, then click delete
+            gateway_row = frame.locator(f'tr[id="gateway-row-{gw_id}"]')
+            menu_btn = gateway_row.locator('button[aria-expanded]')
             try:
-                delete_btn.wait_for(state="visible", timeout=15000)
+                menu_btn.wait_for(state="visible", timeout=15000)
             except PlaywrightTimeoutError:
-                pytest.skip(f"Delete button for gateway {gw_id} not visible")
-
+                pytest.skip(f"Overflow menu button for gateway {gw_id} not visible")
+            
+            menu_btn.click()
+            
+            # Wait for dropdown to be visible and Alpine.js transition to complete
+            dropdown = gateway_row.locator('div[x-show="menuOpen"]')
+            try:
+                dropdown.wait_for(state="visible", timeout=5000)
+            except PlaywrightTimeoutError:
+                pytest.skip("Overflow menu dropdown did not become visible")
+            
+            # Additional wait for Alpine.js transition animation (100ms enter duration)
+            page.wait_for_timeout(150)
+            
+            # Click delete button inside dropdown (scope to dropdown to avoid strict mode violation)
+            delete_btn = dropdown.locator('form[action*="/delete"] button[type="submit"]')
+            
             with page.expect_response(lambda r: f"/gateways/{gw_id}/delete" in r.url, timeout=15000):
                 delete_btn.click()
 
@@ -808,15 +838,31 @@ class TestIframeFormSubmission:
             self._reload_iframe(page, frame)
             self._navigate_to_gateways_tab(page, frame)
 
-            # Click the deactivate/toggle button for this gateway
-            toggle_btn = frame.locator(f'form[action*="/gateways/{gw_id}/state"] button[type="submit"]')
+            # Open overflow menu for this gateway, then click deactivate
+            gateway_row = frame.locator(f'tr[id="gateway-row-{gw_id}"]')
+            menu_btn = gateway_row.locator('button[aria-expanded]')
             try:
-                toggle_btn.first.wait_for(state="visible", timeout=15000)
+                menu_btn.wait_for(state="visible", timeout=15000)
             except PlaywrightTimeoutError:
-                pytest.skip(f"Toggle button for gateway {gw_id} not visible")
-
+                pytest.skip(f"Overflow menu button for gateway {gw_id} not visible")
+            
+            menu_btn.click()
+            
+            # Wait for dropdown to be visible and Alpine.js transition to complete
+            dropdown = gateway_row.locator('div[x-show="menuOpen"]')
+            try:
+                dropdown.wait_for(state="visible", timeout=5000)
+            except PlaywrightTimeoutError:
+                pytest.skip("Overflow menu dropdown did not become visible")
+            
+            # Additional wait for Alpine.js transition animation (100ms enter duration)
+            page.wait_for_timeout(150)
+            
+            # Click deactivate button inside dropdown (scope to dropdown to avoid strict mode violation)
+            toggle_btn = dropdown.locator('form[action*="/state"] button[type="submit"]')
+            
             with page.expect_response(lambda r: f"/gateways/{gw_id}/state" in r.url, timeout=15000):
-                toggle_btn.first.click()
+                toggle_btn.click()
 
             # Verify gateway is now inactive
             verify_resp = admin_api.get(f"/gateways/{gw_id}")
