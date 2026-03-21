@@ -2320,7 +2320,7 @@ load-test-agentgateway-mcp-server-time:    ## Load test external MCP server (loc
 # help: load-test-mcp-protocol-heavy - MCP-only protocol heavy test (500 users, 5min)
 
 MCP_PROTOCOL_LOCUSTFILE ?= tests/loadtest/locustfile_mcp_protocol.py
-MCP_RATE_LIMITER_LOCUSTFILE ?= tests/loadtest/locustfile_rate_limiter.py
+MCP_RATE_LIMITER_LOCUSTFILE ?= tests/loadtest/locustfile_rate_limiter_backend_correctness.py
 MCP_RATE_LIMITER_ALGO_LOCUSTFILE ?= tests/loadtest/locustfile_rate_limiter_algorithms.py
 MCP_RATE_LIMITER_SCALE_LOCUSTFILE ?= tests/loadtest/locustfile_rate_limiter_scale.py
 RL_ALGORITHM ?= fixed_window

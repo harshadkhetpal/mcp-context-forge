@@ -531,8 +531,11 @@ def on_test_stop(environment, **kwargs):
     rl_count = rl_entry.num_requests if rl_entry else 0
     allowed_entry = stats.entries.get(("MCP tools/call [allowed]", "POST"), None)
     allowed_count = allowed_entry.num_requests if allowed_entry else 0
-    semantic_allowed = allowed_count - rl_count
-    rl_pct = (rl_count / allowed_count * 100) if allowed_count > 0 else 0
+    # Each request is classified in-place: allowed_count and rl_count are already
+    # mutually exclusive — no subtraction needed.
+    semantic_allowed = allowed_count
+    tool_calls = allowed_count + rl_count  # excludes infra errors
+    rl_pct = (rl_count / tool_calls * 100) if tool_calls > 0 else 0
 
     print("\n" + "=" * 90)
     print(f"RATE LIMITER SCALE TEST — {RL_ALGORITHM.upper()}")
@@ -545,7 +548,7 @@ def on_test_stop(environment, **kwargs):
     # Rate accuracy
     print(f"\n  {'RATE LIMITING ACCURACY':^86}")
     print("  " + "-" * 86)
-    print(f"  Tool call attempts:        {allowed_count:>8,}")
+    print(f"  Tool call attempts:        {tool_calls:>8,}")
     print(f"  Allowed through:           {semantic_allowed:>8,}")
     print(f"  Rate-limited (blocked):    {rl_count:>8,}  ({rl_pct:.1f}%)")
     print(f"  Infrastructure failures:   {infra_fails:>8,}")
@@ -748,7 +751,15 @@ class ScaleComparisonUser(FastHttpUser):
     @task
     @tag("rate-limit", "scale", "tools")
     def call_tool(self) -> None:
-        if not _tool_names:
+        """Call a tool; classify the response in-place as allowed, rate-limited, or infra-error.
+
+        A single tools/call request is sent. The Locust stat name is set based on
+        the semantic outcome — no second request is fired:
+          - 'MCP tools/call [allowed]'      — gateway processed the call normally
+          - 'MCP tools/call [rate-limited]' — gateway returned isError (plugin block)
+          - 'MCP tools/call [infra-error]'  — HTTP error or malformed response
+        """
+        if not _tool_names or not _server_id:
             return
 
         tool = _tool_names[0]
@@ -762,19 +773,48 @@ class ScaleComparisonUser(FastHttpUser):
         else:
             args = {}
 
-        result = self._mcp_post("tools/call", {"name": tool, "arguments": args}, "MCP tools/call [allowed]")
+        try:
+            with self.client.post(
+                f"/servers/{_server_id}/mcp",
+                data=json.dumps(_jsonrpc("tools/call", {"name": tool, "arguments": args})),
+                headers=self._headers(),
+                name="MCP tools/call",
+                catch_response=True,
+            ) as response:
+                sid = response.headers.get("Mcp-Session-Id") if response.headers else None
+                if sid:
+                    self._mcp_session_id = sid
 
-        if isinstance(result, dict) and result.get("isError"):
-            with _stats_lock:
-                pass  # global blocked count tracked via locust stats
-            try:
-                with self.client.post(
-                    f"/servers/{_server_id}/mcp",
-                    data=json.dumps(_jsonrpc("tools/call", {"name": tool, "arguments": args})),
-                    headers=self._headers(),
-                    name="MCP tools/call [rate-limited]",
-                    catch_response=True,
-                ) as resp:
-                    resp.failure("rate limited")
-            except Exception:
-                pass
+                if response.status_code in (502, 503, 504):
+                    response.request_meta["name"] = "MCP tools/call [infra-error]"
+                    response.failure(f"Infrastructure error: {response.status_code}")
+                    return
+                if response.status_code != 200:
+                    response.request_meta["name"] = "MCP tools/call [infra-error]"
+                    response.failure(f"HTTP {response.status_code}")
+                    return
+                try:
+                    data = response.json()
+                except Exception:
+                    response.request_meta["name"] = "MCP tools/call [infra-error]"
+                    response.failure("Invalid JSON")
+                    return
+                if data is None:
+                    response.request_meta["name"] = "MCP tools/call [infra-error]"
+                    response.failure("Null response")
+                    return
+                if "error" in data:
+                    err = data["error"]
+                    response.request_meta["name"] = "MCP tools/call [infra-error]"
+                    response.failure(f"JSON-RPC error {err.get('code', '?')}: {err.get('message', '?')}")
+                    return
+
+                result = data.get("result")
+                if isinstance(result, dict) and result.get("isError"):
+                    response.request_meta["name"] = "MCP tools/call [rate-limited]"
+                    response.success()
+                else:
+                    response.request_meta["name"] = "MCP tools/call [allowed]"
+                    response.success()
+        except Exception as exc:
+            logger.warning("Request failed (tools/call): %s", exc)
