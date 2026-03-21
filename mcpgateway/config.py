@@ -1631,6 +1631,40 @@ class Settings(BaseSettings):
     mcpgateway_session_affinity_max_sessions: int = 1  # Max sessions per identity for affinity
     mcpgateway_pool_rpc_forward_timeout: int = 30  # Timeout for forwarding RPC requests to owner worker
 
+    # Watcher Pool - maintains SSE connections per active upstream for tool list auto-refresh
+    watcher_pool_enabled: bool = Field(
+        default=True,
+        description="Enable lazy watcher pool for proactive tool list refresh via notifications"
+    )
+    watcher_idle_timeout_seconds: float = Field(
+        default=300.0,  # 5 minutes
+        description="Idle timeout: close watcher after this many seconds of no active sessions"
+    )
+    watcher_idle_check_interval_seconds: float = Field(
+        default=30.0,
+        description="Interval for idle monitor to check timeout condition"
+    )
+    watcher_reconnect_max_attempts: int = Field(
+        default=10,
+        description="Max reconnect attempts before giving up on an upstream"
+    )
+    watcher_reconnect_max_backoff_seconds: float = Field(
+        default=60.0,
+        description="Max wait between reconnect attempts (exponential backoff capped here)"
+    )
+    watcher_tools_refresh_retries: int = Field(
+        default=3,
+        description="Retries for tools/list fetch after receiving notification"
+    )
+    watcher_tools_refresh_backoff_seconds: List[float] = Field(
+        default=[1.0, 2.0, 4.0],
+        description="Backoff delays in seconds for tools/list refresh retries [1s, 2s, 4s]"
+    )
+    watcher_sse_connect_timeout_seconds: float = Field(
+        default=30.0,
+        description="Timeout for initial SSE connection to upstream"
+    )
+
     # Prompts
     prompt_cache_size: int = 100
     max_prompt_size: int = 100 * 1024  # 100KB

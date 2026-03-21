@@ -215,6 +215,25 @@ MessageHandlerFactory = Callable[
     ],
 ]
 
+# Type aliases for session lifecycle hooks
+# Fired when a session is acquired from the pool or newly created
+SessionAcquiredCallback = Callable[
+    [str, Optional[str]],  # (server_url, gateway_id)
+    Any,  # Coroutine
+]
+
+# Fired when a session is released back to the pool
+SessionReleasedCallback = Callable[
+    [str, Optional[str]],  # (server_url, gateway_id)
+    Any,  # Coroutine
+]
+
+# Fired when a session is closed/expired (either TTL or discard)
+SessionExpiredCallback = Callable[
+    [str, Optional[str]],  # (server_url, gateway_id)
+    Any,  # Coroutine
+]
+
 
 class MCPSessionPool:  # pylint: disable=too-many-instance-attributes
     """
@@ -370,6 +389,11 @@ class MCPSessionPool:  # pylint: disable=too-many-instance-attributes
 
         # Lifecycle
         self._closed = False
+
+        # Session lifecycle hooks (for watcher pool integration)
+        self._session_acquired_callbacks: list[SessionAcquiredCallback] = []
+        self._session_released_callbacks: list[SessionReleasedCallback] = []
+        self._session_expired_callbacks: list[SessionExpiredCallback] = []
 
         # Pre-registered session mappings for session affinity
         # Mapping from (mcp_session_id, url, transport_type, gateway_id) -> pool_key
@@ -816,6 +840,8 @@ class MCPSessionPool:  # pylint: disable=too-many-instance-attributes
                 async with lock:
                     self._active[pool_key].add(pooled)
                 logger.debug(f"Pool hit for {sanitize_url_for_logging(url)} (identity={pool_key[2][:8]}, transport={transport_type.value})")
+                # Fire session acquired hook (fire-and-forget)
+                asyncio.create_task(self._fire_session_acquired_hooks(url, gateway_id))
                 return pooled
 
             # Session invalid, close it
@@ -865,6 +891,8 @@ class MCPSessionPool:  # pylint: disable=too-many-instance-attributes
             async with lock:
                 self._active[pool_key].add(pooled)
             logger.debug(f"Pool miss for {sanitize_url_for_logging(url)} - created new session (transport={transport_type.value})")
+            # Fire session acquired hook (fire-and-forget)
+            asyncio.create_task(self._fire_session_acquired_hooks(url, gateway_id))
             return pooled
         except BaseException as e:
             # Release semaphore on ANY failure (including CancelledError)
@@ -908,6 +936,9 @@ class MCPSessionPool:  # pylint: disable=too-many-instance-attributes
             # eviction sees recent activity.
             self._pool_last_used[pool_key] = time.time()
             self._active.get(pool_key, set()).discard(pooled)
+
+        # Fire session released hook (fire-and-forget)
+        asyncio.create_task(self._fire_session_released_hooks(pooled.url, pooled.gateway_id))
 
         # Discard broken sessions instead of recycling them
         if discard:
@@ -1321,6 +1352,9 @@ class MCPSessionPool:  # pylint: disable=too-many-instance-attributes
             mcp_session_id = headers_lower.get("x-mcp-session-id")
             if mcp_session_id and self.is_valid_mcp_session_id(mcp_session_id):
                 await self._cleanup_pool_session_owner(mcp_session_id)
+
+        # Fire session expired hook (fire-and-forget)
+        asyncio.create_task(self._fire_session_expired_hooks(pooled.url, pooled.gateway_id))
 
     async def _cleanup_pool_session_owner(self, mcp_session_id: str) -> None:
         """Clean up pool_owner key in Redis when session is closed.
@@ -1891,6 +1925,78 @@ class MCPSessionPool:  # pylint: disable=too-many-instance-attributes
             self._forwarded_request_failures += 1
             logger.warning(f"Error forwarding HTTP request via Redis: {e}")
             return None
+
+    def register_session_acquired_callback(self, callback: SessionAcquiredCallback) -> None:
+        """Register a callback to be invoked when a session is acquired.
+
+        The callback is called with (server_url, gateway_id) and should be async.
+
+        Args:
+            callback: Async callable that takes (server_url, gateway_id)
+        """
+        self._session_acquired_callbacks.append(callback)
+        logger.debug(f"Registered session_acquired callback: {callback.__name__}")
+
+    def register_session_released_callback(self, callback: SessionReleasedCallback) -> None:
+        """Register a callback to be invoked when a session is released.
+
+        The callback is called with (server_url, gateway_id) and should be async.
+
+        Args:
+            callback: Async callable that takes (server_url, gateway_id)
+        """
+        self._session_released_callbacks.append(callback)
+        logger.debug(f"Registered session_released callback: {callback.__name__}")
+
+    def register_session_expired_callback(self, callback: SessionExpiredCallback) -> None:
+        """Register a callback to be invoked when a session expires.
+
+        The callback is called with (server_url, gateway_id) and should be async.
+
+        Args:
+            callback: Async callable that takes (server_url, gateway_id)
+        """
+        self._session_expired_callbacks.append(callback)
+        logger.debug(f"Registered session_expired callback: {callback.__name__}")
+
+    async def _fire_session_acquired_hooks(self, url: str, gateway_id: Optional[str]) -> None:
+        """Fire all registered session_acquired callbacks (fire-and-forget).
+
+        Args:
+            url: The server URL.
+            gateway_id: Optional gateway ID.
+        """
+        for callback in self._session_acquired_callbacks:
+            try:
+                await callback(url, gateway_id)
+            except Exception as e:
+                logger.exception(f"Error in session_acquired callback: {e}")
+
+    async def _fire_session_released_hooks(self, url: str, gateway_id: Optional[str]) -> None:
+        """Fire all registered session_released callbacks (fire-and-forget).
+
+        Args:
+            url: The server URL.
+            gateway_id: Optional gateway ID.
+        """
+        for callback in self._session_released_callbacks:
+            try:
+                await callback(url, gateway_id)
+            except Exception as e:
+                logger.exception(f"Error in session_released callback: {e}")
+
+    async def _fire_session_expired_hooks(self, url: str, gateway_id: Optional[str]) -> None:
+        """Fire all registered session_expired callbacks (fire-and-forget).
+
+        Args:
+            url: The server URL.
+            gateway_id: Optional gateway ID.
+        """
+        for callback in self._session_expired_callbacks:
+            try:
+                await callback(url, gateway_id)
+            except Exception as e:
+                logger.exception(f"Error in session_expired callback: {e}")
 
     def get_metrics(self) -> Dict[str, Any]:
         """

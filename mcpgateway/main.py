@@ -1634,6 +1634,42 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
                 pool._rpc_listener_task = asyncio.create_task(pool.start_rpc_listener())  # pylint: disable=protected-access
                 logger.info("Multi-worker session affinity RPC listener started")
 
+        # Initialize watcher pool for proactive tool list refresh via notifications
+        if settings.watcher_pool_enabled and settings.mcp_session_pool_enabled:
+            # First-Party
+            from mcpgateway.services.watcher_pool_manager import init_watcher_pool_manager, get_watcher_pool_manager  # pylint: disable=import-outside-toplevel
+            from mcpgateway.services.mcp_session_pool import get_mcp_session_pool  # pylint: disable=import-outside-toplevel
+
+            try:
+                # Initialize watcher pool manager with config values
+                watcher_pool = init_watcher_pool_manager(
+                    idle_timeout_seconds=settings.watcher_idle_timeout_seconds,
+                    idle_check_interval_seconds=settings.watcher_idle_check_interval_seconds,
+                    max_reconnect_attempts=settings.watcher_reconnect_max_attempts,
+                    max_backoff_seconds=settings.watcher_reconnect_max_backoff_seconds,
+                    tools_refresh_retries=settings.watcher_tools_refresh_retries,
+                    tools_refresh_backoff=settings.watcher_tools_refresh_backoff_seconds,
+                    sse_connect_timeout=settings.watcher_sse_connect_timeout_seconds,
+                    session_pool=get_mcp_session_pool(),
+                    gateway_service=gateway_service,
+                )
+
+                # Initialize the manager
+                await watcher_pool.initialize()
+                logger.info("Watcher pool manager initialized")
+
+                # Register lifecycle callbacks with session pool
+                session_pool = get_mcp_session_pool()
+                session_pool.register_session_acquired_callback(watcher_pool.on_session_acquired)
+                session_pool.register_session_released_callback(watcher_pool.on_session_released)
+                session_pool.register_session_expired_callback(watcher_pool.on_session_expired)
+                logger.info("Watcher pool callbacks registered with session pool")
+
+            except Exception as e:
+                logger.error(f"Failed to initialize watcher pool: {e}")
+                # Non-fatal - watcher pool is optional
+                pass
+
         await root_service.initialize()
         await completion_service.initialize()
         await sampling_handler.initialize()
@@ -1852,6 +1888,21 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             services_to_shutdown.insert(2, metrics_cleanup_service)
 
         await shutdown_services(services_to_shutdown)
+
+        # Shutdown watcher pool (before session pool)
+        if settings.watcher_pool_enabled and settings.mcp_session_pool_enabled:
+            try:
+                # First-Party
+                from mcpgateway.services.watcher_pool_manager import get_watcher_pool_manager  # pylint: disable=import-outside-toplevel
+
+                watcher_pool = get_watcher_pool_manager()
+                await watcher_pool.shutdown(timeout=10.0)
+                logger.info("Watcher pool shutdown complete")
+            except RuntimeError:
+                # Not initialized, skip
+                pass
+            except Exception as e:
+                logger.error(f"Error shutting down watcher pool: {e}")
 
         # Shutdown MCP session pool (before shared HTTP client)
         if settings.mcp_session_pool_enabled:
