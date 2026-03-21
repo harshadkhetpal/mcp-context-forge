@@ -662,6 +662,9 @@ class RateLimiterPlugin(Plugin):
         if self._cfg.algorithm not in VALID_ALGORITHMS:
             errors.append(f"algorithm={self._cfg.algorithm!r}: must be one of {VALID_ALGORITHMS}")
 
+        if self._cfg.backend not in ("memory", "redis"):
+            errors.append(f"backend={self._cfg.backend!r}: must be 'memory' or 'redis'")
+
         for field_name, value in [("by_user", self._cfg.by_user), ("by_tenant", self._cfg.by_tenant)]:
             if value is not None:
                 try:
