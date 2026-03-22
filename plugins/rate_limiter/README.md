@@ -103,7 +103,7 @@ Each identity (user, tenant, tool) has a bucket that holds up to `count` tokens.
 
 - Counters are stored in a process-local dict (`_store`)
 - An `asyncio.Lock` serialises all counter reads and writes — safe under concurrent asyncio tasks
-- A background sweep task evicts expired windows every 0.5s — memory is bounded to active windows only
+- A background sweep task evicts expired windows every 0.5s — for `fixed_window` and `token_bucket`, expired entries are removed promptly; for `sliding_window`, keys with fully stale timestamps are evicted by the sweep
 - **Limitation:** state is not shared across processes or hosts. In a multi-instance deployment (e.g. 3 gateway instances behind nginx), each instance tracks its own counter — the effective limit is `N × configured_limit`
 
 ### Redis backend

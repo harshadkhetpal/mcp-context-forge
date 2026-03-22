@@ -259,9 +259,10 @@ class SlidingWindowAlgorithm:
         """Check the sliding-window log for *key* and record the request if allowed."""
         now = time.time()
         cutoff = now - window
+        win_key = f"{key}:{window}"
 
         async with lock:
-            timestamps = self._store.get(key, [])
+            timestamps = self._store.get(win_key, [])
             # Drop timestamps outside the current window
             timestamps = [t for t in timestamps if t > cutoff]
 
@@ -270,21 +271,28 @@ class SlidingWindowAlgorithm:
             reset_in = max(0, int(reset_timestamp - now))
 
             if current >= count:
-                self._store[key] = timestamps
+                self._store[win_key] = timestamps
                 return False, count, reset_timestamp, {"limited": True, "remaining": 0, "reset_in": reset_in}
 
             timestamps.append(now)
-            self._store[key] = timestamps
+            self._store[win_key] = timestamps
             remaining = count - len(timestamps)
             return True, count, reset_timestamp, {"limited": True, "remaining": remaining, "reset_in": reset_in}
 
     async def sweep(self, lock: asyncio.Lock) -> None:
-        """Evict keys whose timestamp list is empty (no recent requests)."""
+        """Evict keys whose entire timestamp list is outside the current window.
+
+        The window duration is encoded in the key as ``{key}:{window_seconds}``,
+        mirroring FixedWindowAlgorithm. This allows sweep() to compute the cutoff
+        per key and evict idle entries rather than waiting for the next allow() call.
+        """
+        now = time.time()
         async with lock:
-            # We don't know window per key here — just remove empty lists
-            # (full eviction happens naturally as timestamps age out on next allow())
-            empty = [k for k, ts in self._store.items() if not ts]
-            for k in empty:
+            stale = [
+                k for k, ts in self._store.items()
+                if not ts or all(t <= now - int(k.rsplit(":", 1)[-1]) for t in ts)
+            ]
+            for k in stale:
                 del self._store[k]
 
 
@@ -694,12 +702,13 @@ class RateLimiterPlugin(Plugin):
         try:
             prompt = payload.prompt_id.strip().lower()
             user = _extract_user_identity(context.global_context.user)
-            tenant = (str(context.global_context.tenant_id).strip() if context.global_context.tenant_id else "") or "default"
+            tenant = str(context.global_context.tenant_id).strip() if context.global_context.tenant_id else None
 
             results = [
                 await self._rate_backend.allow(f"user:{user}", self._cfg.by_user),
-                await self._rate_backend.allow(f"tenant:{tenant}", self._cfg.by_tenant),
             ]
+            if tenant and self._cfg.by_tenant:
+                results.append(await self._rate_backend.allow(f"tenant:{tenant}", self._cfg.by_tenant))
 
             if self._normalised_by_tool and prompt in self._normalised_by_tool:
                 results.append(await self._rate_backend.allow(f"tool:{prompt}", self._normalised_by_tool[prompt]))
@@ -736,12 +745,13 @@ class RateLimiterPlugin(Plugin):
         try:
             tool = payload.name.strip().lower()
             user = _extract_user_identity(context.global_context.user)
-            tenant = (str(context.global_context.tenant_id).strip() if context.global_context.tenant_id else "") or "default"
+            tenant = str(context.global_context.tenant_id).strip() if context.global_context.tenant_id else None
 
             results = [
                 await self._rate_backend.allow(f"user:{user}", self._cfg.by_user),
-                await self._rate_backend.allow(f"tenant:{tenant}", self._cfg.by_tenant),
             ]
+            if tenant and self._cfg.by_tenant:
+                results.append(await self._rate_backend.allow(f"tenant:{tenant}", self._cfg.by_tenant))
 
             if self._normalised_by_tool and tool in self._normalised_by_tool:
                 results.append(await self._rate_backend.allow(f"tool:{tool}", self._normalised_by_tool[tool]))

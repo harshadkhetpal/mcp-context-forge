@@ -882,10 +882,10 @@ async def test_empty_string_user_falls_back_to_anonymous():
 
 
 @pytest.mark.asyncio
-async def test_none_tenant_falls_back_to_default_bucket():
+async def test_none_tenant_skips_by_tenant_check():
     """
-    None tenant_id falls back to 'default'. Multiple users with no tenant
-    share the same tenant bucket — they can exhaust each other's tenant limit.
+    None tenant_id must skip the by_tenant dimension entirely — no shared 'default' bucket.
+    Multiple users with no tenant ID must not cross-throttle each other.
     """
     plugin = RateLimiterPlugin(
         PluginConfig(
@@ -902,12 +902,11 @@ async def test_none_tenant_falls_back_to_default_bucket():
 
     r1 = await plugin.tool_pre_invoke(payload, ctx_alice)
     r2 = await plugin.tool_pre_invoke(payload, ctx_bob)
-    r3 = await plugin.tool_pre_invoke(payload, ctx_alice)  # tenant "default" exhausted
+    r3 = await plugin.tool_pre_invoke(payload, ctx_alice)  # by_tenant skipped — must not block
 
     assert r1.violation is None
     assert r2.violation is None
-    assert r3.violation is not None  # both users share "default" tenant bucket
-    assert r3.violation.http_status_code == 429
+    assert r3.violation is None  # by_tenant is skipped when tenant_id is None
 
 
 @pytest.mark.asyncio
@@ -2841,3 +2840,95 @@ async def test_remaining_header_never_goes_negative_for_any_algorithm(algorithm:
         assert remaining_str is not None, "X-RateLimit-Remaining header must always be present"
         remaining = int(remaining_str)
         assert remaining >= 0, f"Remaining went negative ({remaining}) for algorithm={algorithm}"
+
+
+# =============================================================================
+# P1 Tests — SlidingWindowAlgorithm sweep() correctness
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_sliding_window_sweep_evicts_keys_with_fully_stale_timestamps():
+    """sweep() must remove keys whose entire timestamp list is outside the window.
+
+    After a burst of activity, a key's timestamps age out over time.  The
+    background sweep must remove such keys so memory does not grow without bound
+    in long-lived gateways with transient users.
+
+    This is a regression test: the previous implementation only removed keys
+    with empty lists, leaving stale-but-non-empty entries alive indefinitely.
+    """
+    algorithm = SlidingWindowAlgorithm()
+    lock = asyncio.Lock()
+
+    with patch("plugins.rate_limiter.rate_limiter.time") as mock_time:
+        # t=0: user makes requests that fill the window
+        mock_time.time.return_value = 0.0
+        await algorithm.allow(lock, "user:alice", 3, 1)
+        await algorithm.allow(lock, "user:alice", 3, 1)
+
+        # Confirm the key is present in the store
+        assert any("user:alice" in k for k in algorithm._store), (
+            "Key must exist in store after allow() calls"
+        )
+
+        # t=5: well past the 1-second window — all timestamps are stale
+        mock_time.time.return_value = 5.0
+        await algorithm.sweep(lock)
+
+    # sweep() must have evicted the key — no stale entry should remain
+    assert not any("user:alice" in k for k in algorithm._store), (
+        "sweep() must evict keys with fully stale timestamps, not just empty lists — "
+        "idle users must not accumulate memory indefinitely"
+    )
+
+
+@pytest.mark.asyncio
+async def test_sliding_window_sweep_does_not_evict_active_keys():
+    """sweep() must not remove keys that still have timestamps within the window."""
+    algorithm = SlidingWindowAlgorithm()
+    lock = asyncio.Lock()
+
+    with patch("plugins.rate_limiter.rate_limiter.time") as mock_time:
+        mock_time.time.return_value = 0.0
+        await algorithm.allow(lock, "user:bob", 3, 60)  # 60-second window
+
+        # t=10: still well within the 60-second window
+        mock_time.time.return_value = 10.0
+        await algorithm.sweep(lock)
+
+    # Key must still be present — it has active timestamps
+    assert any("user:bob" in k for k in algorithm._store), (
+        "sweep() must not evict keys whose timestamps are still within the window"
+    )
+
+
+@pytest.mark.asyncio
+async def test_sliding_window_allow_after_sweep_starts_fresh():
+    """After sweep() evicts a stale key, a subsequent allow() treats it as a new key.
+
+    This validates that eviction and re-admission work together correctly:
+    a user who was rate-limited, goes idle (key swept), and returns should
+    start with a full quota — not inherit leftover state.
+    """
+    algorithm = SlidingWindowAlgorithm()
+    lock = asyncio.Lock()
+
+    with patch("plugins.rate_limiter.rate_limiter.time") as mock_time:
+        # Exhaust the limit at t=0
+        mock_time.time.return_value = 0.0
+        await algorithm.allow(lock, "user:carol", 2, 1)
+        await algorithm.allow(lock, "user:carol", 2, 1)
+        blocked, *_ = await algorithm.allow(lock, "user:carol", 2, 1)
+        assert blocked is False, "Third request must be blocked"
+
+        # t=5: window expired — sweep evicts the stale key
+        mock_time.time.return_value = 5.0
+        await algorithm.sweep(lock)
+
+        # t=5: allow() must treat carol as a fresh key with full quota
+        allowed, *_ = await algorithm.allow(lock, "user:carol", 2, 1)
+        assert allowed is True, (
+            "After sweep() evicts the stale key, the next allow() must start fresh "
+            "with a full quota — stale state must not persist"
+        )
