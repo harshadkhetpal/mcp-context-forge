@@ -13,7 +13,7 @@ Redis memory diverges visibly as user count grows:
 
   fixed_window    1 key  per user  =   N integers          (O(N))
   sliding_window  1 key  per user  =   N × W timestamps    (O(N × W))
-  token_bucket    memory-only      =   N buckets per gateway process
+  token_bucket    1 hash per user  =   tokens + last_refill (~0.2 KiB/key)
 
 With 100 users and a 30/m limit (W=30 timestamps/window):
   fixed_window    ~100 Redis keys   → ~10 KB
@@ -41,9 +41,10 @@ Environment Variables
 ---------------------
   RL_ALGORITHM:           Algorithm (default: fixed_window)
   RL_LIMIT_PER_MIN:       Configured limit (default: 30)
-  RL_USERS:               Number of unique users (default: 100)
-  RL_SPAWN_RATE:          Users spawned per second (default: 5)
-  RL_RUN_TIME:            Test duration (default: 90s)
+  RL_USERS:               Number of unique users (default: 500)
+  RL_SPAWN_RATE:          Users spawned per second (default: 20)
+  RL_RUN_TIME:            Test duration (default: 300s — 5 full 60s windows)
+  RL_REQS_PER_SECOND:     Request pace per user (default: 1.0 = 60 req/min, 2× limit)
   MCP_SERVER_ID:          Virtual server UUID (auto-detected if empty)
   DOCKER_GATEWAY_PATTERN: Container name pattern (default: mcp-context-forge-gateway)
   DOCKER_REDIS_CONTAINER: Redis container name (default: mcp-context-forge-redis-1)
@@ -119,13 +120,13 @@ MCP_SERVER_ID = _cfg("MCP_SERVER_ID", "")
 RL_ALGORITHM = _cfg("RL_ALGORITHM", "fixed_window")
 RL_LIMIT_PER_MIN = int(_cfg("RL_LIMIT_PER_MIN", "30"))
 RL_USERS = int(_cfg("RL_USERS", "100"))
-RL_SPAWN_RATE = int(_cfg("RL_SPAWN_RATE", "5"))
-RL_RUN_TIME = _cfg("RL_RUN_TIME", "90s")
+RL_SPAWN_RATE = int(_cfg("RL_SPAWN_RATE", "10"))
+RL_RUN_TIME = _cfg("RL_RUN_TIME", "300s")
 
 DOCKER_GATEWAY_PATTERN = _cfg("DOCKER_GATEWAY_PATTERN", "mcp-context-forge-gateway")
 DOCKER_REDIS_CONTAINER = _cfg("DOCKER_REDIS_CONTAINER", "mcp-context-forge-redis-1")
 
-_REQS_PER_SECOND = 1.0
+_REQS_PER_SECOND = float(_cfg("RL_REQS_PER_SECOND", "1.0"))
 
 logging.basicConfig(level=logging.ERROR)
 logger = logging.getLogger(__name__)
@@ -151,6 +152,16 @@ _user_tokens: list[str] = []
 _registered_state: dict[str, Any] = {}  # {"host": ..., "users": [{"email": ...}]}
 
 _stats_lock = threading.Lock()
+
+# 30-second window buckets — {bucket_index: {"allowed": int, "blocked": int}}
+_bucket_stats: dict[int, dict[str, int]] = defaultdict(lambda: {"allowed": 0, "blocked": 0})
+
+# Pre-bootstrap Redis snapshot (t=0, before any RL keys exist)
+_redis_baseline: dict[str, Any] | None = None
+# Algorithm detected from Redis key types after steady state
+_detected_algorithm: str = ""
+# Number of bootstrapped users with valid JWT tokens
+_valid_users: int = 0
 
 _TEST_PASSWORD = "ScaleTest123!"
 _USER_PREFIX = "rl-scale"
@@ -265,15 +276,37 @@ _redis_poll_thread: threading.Thread | None = None
 _active_users = 0  # updated by user on_start/on_stop
 
 
-def _poll_redis_once() -> dict[str, Any] | None:
-    """Query Redis for key count and memory usage via docker exec."""
+def _scan_redis_pattern(pattern: str, timeout: int = 20) -> int:
+    """Count Redis keys matching a pattern using non-blocking SCAN iteration."""
     try:
-        # DBSIZE — total key count
+        r = subprocess.run(
+            ["docker", "exec", DOCKER_REDIS_CONTAINER, "redis-cli", "--scan", "--pattern", pattern],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        if r.returncode != 0:
+            return 0
+        return sum(1 for line in r.stdout.splitlines() if line.strip())
+    except Exception:
+        return 0
+
+
+def _poll_redis_once() -> dict[str, Any] | None:
+    """Query Redis for key count and memory usage via docker exec.
+
+    Returns both total_keys (DBSIZE) and rl_keys (user:* + tenant:* only)
+    so the summary can report RL-specific memory per key without noise from
+    unrelated keys (session store, user DB cache, etc.).
+    """
+    try:
+        # DBSIZE — total key count (for reference / sanity check)
         r_dbsize = subprocess.run(
             ["docker", "exec", DOCKER_REDIS_CONTAINER, "redis-cli", "DBSIZE"],
             capture_output=True, text=True, timeout=5,
         )
-        keys = int(r_dbsize.stdout.strip()) if r_dbsize.returncode == 0 else 0
+        total_keys = int(r_dbsize.stdout.strip()) if r_dbsize.returncode == 0 else 0
+
+        # RL-specific keys only (rl:user:* = per-user buckets, rl:tenant:* = per-team buckets)
+        rl_keys = _scan_redis_pattern("rl:user:*") + _scan_redis_pattern("rl:tenant:*")
 
         # INFO memory — used_memory in bytes
         r_mem = subprocess.run(
@@ -288,7 +321,9 @@ def _poll_redis_once() -> dict[str, Any] | None:
 
         return {
             "elapsed": time.time() - _test_start_time,
-            "keys": keys,
+            "total_keys": total_keys,
+            "rl_keys": rl_keys,
+            "keys": rl_keys,  # alias used by display code
             "mem_mib": mem_bytes / (1024 * 1024),
             "users": _active_users,
         }
@@ -297,12 +332,48 @@ def _poll_redis_once() -> dict[str, Any] | None:
         return None
 
 
+def _detect_algorithm_from_redis() -> str:
+    """Detect the active rate-limiting algorithm by inspecting Redis key types.
+
+    After steady state there should be user:* keys in Redis.  Their data type
+    reveals which algorithm is running:
+      string  → fixed_window   (single integer counter)
+      zset    → sliding_window (sorted set of request timestamps)
+      hash    → token_bucket   (tokens + last_refill timestamp)
+    """
+    try:
+        r_scan = subprocess.run(
+            ["docker", "exec", DOCKER_REDIS_CONTAINER, "redis-cli", "--scan", "--pattern", "rl:user:*"],
+            capture_output=True, text=True, timeout=15,
+        )
+        sample_keys = [l.strip() for l in r_scan.stdout.splitlines() if l.strip()]
+        if not sample_keys:
+            return f"unknown — no rl:user:* keys in Redis (expected for {RL_ALGORITHM}?)"
+
+        r_type = subprocess.run(
+            ["docker", "exec", DOCKER_REDIS_CONTAINER, "redis-cli", "TYPE", sample_keys[0]],
+            capture_output=True, text=True, timeout=5,
+        )
+        key_type = r_type.stdout.strip().lower()
+
+        mapping = {
+            "string": "fixed_window",
+            "zset": "sliding_window",
+            "hash": "token_bucket",
+        }
+        detected = mapping.get(key_type, f"unknown ({key_type})")
+        match = "✅ matches config" if detected == RL_ALGORITHM else f"⚠️  MISMATCH — config says {RL_ALGORITHM}"
+        return f"{detected}  [Redis key type: {key_type}]  {match}"
+    except Exception as exc:
+        return f"detection failed: {exc}"
+
+
 def _redis_poll_loop() -> None:
     while _redis_poll_running:
         entry = _poll_redis_once()
         if entry:
             _redis_timeline.append(entry)
-        time.sleep(10)
+        time.sleep(5)
 
 
 def _start_redis_monitor() -> None:
@@ -443,6 +514,8 @@ def _bootstrap_users(host: str) -> None:
     _registered_state = {"host": host, "users": registered}
 
     valid = sum(1 for t in tokens if t)
+    global _valid_users  # pylint: disable=global-statement
+    _valid_users = valid
     logger.error("Bootstrap complete: %d/%d users registered with valid tokens", valid, RL_USERS)
 
 
@@ -480,10 +553,18 @@ def set_defaults(parser):
 
 @events.test_start.add_listener
 def on_test_start(environment, **kwargs):
-    global _test_start_time  # pylint: disable=global-statement
+    global _test_start_time, _redis_baseline  # pylint: disable=global-statement
     _test_start_time = time.time()
 
     host = environment.host or "http://localhost:8080"
+
+    # Capture Redis state BEFORE bootstrap so we have a true noise-free baseline.
+    # Bootstrap registers ~N users via the admin API and may create session/auth
+    # keys of its own — the baseline must be taken first.
+    _redis_baseline = _poll_redis_once()
+    if _redis_baseline:
+        _redis_baseline["elapsed"] = 0.0  # normalise to t=0
+
     _bootstrap_users(host)
     _start_stats_monitor()
     _start_redis_monitor()
@@ -503,18 +584,23 @@ def on_test_start(environment, **kwargs):
     logger.error("  Duration:   %s", RL_RUN_TIME)
     logger.error("")
     logger.error("  Redis memory grows proportionally to unique users:")
-    logger.error("    fixed_window   1 integer per user    (~minimal)")
-    logger.error("    sliding_window %d timestamps per user  (~%dx more)", RL_LIMIT_PER_MIN, RL_LIMIT_PER_MIN)
-    logger.error("    token_bucket   memory-only (no Redis keys)")
+    logger.error("    fixed_window   1 integer per user        (~0.1-0.3 KiB/key)")
+    logger.error("    sliding_window %d timestamps per user  (~1-3 KiB/key, %dx more)", RL_LIMIT_PER_MIN, RL_LIMIT_PER_MIN)
+    logger.error("    token_bucket   1 hash per user           (tokens + last_refill, ~0.2 KiB/key)")
     logger.error("=" * 70)
 
 
 @events.test_stop.add_listener
 def on_test_stop(environment, **kwargs):
+    global _detected_algorithm  # pylint: disable=global-statement
+
     # Take a final Redis snapshot before stopping monitors
     final = _poll_redis_once()
     if final:
         _redis_timeline.append(final)
+
+    # Detect the actual algorithm from Redis key types while keys still exist
+    _detected_algorithm = _detect_algorithm_from_redis()
 
     resource_data = _stop_stats_monitor()
     _stop_redis_monitor()
@@ -540,10 +626,11 @@ def on_test_stop(environment, **kwargs):
     print("\n" + "=" * 90)
     print(f"RATE LIMITER SCALE TEST — {RL_ALGORITHM.upper()}")
     print("=" * 90)
-    print(f"\n  Algorithm:         {RL_ALGORITHM}")
-    print(f"  Unique users:      {RL_USERS}  (each with own Redis key)")
-    print(f"  Configured limit:  {RL_LIMIT_PER_MIN} req/min per user")
-    print(f"  Test pace:         {int(_REQS_PER_SECOND * 60)} req/min per user  (2× the limit)")
+    print(f"\n  Algorithm (config): {RL_ALGORITHM}")
+    print(f"  Algorithm (live):   {_detected_algorithm}")
+    print(f"  Unique users:       {_valid_users}/{RL_USERS} with valid tokens")
+    print(f"  Configured limit:   {RL_LIMIT_PER_MIN} req/min per user")
+    print(f"  Test pace:          {int(_REQS_PER_SECOND * 60)} req/min per user  (2× the limit)")
 
     # Rate accuracy
     print(f"\n  {'RATE LIMITING ACCURACY':^86}")
@@ -552,6 +639,25 @@ def on_test_stop(environment, **kwargs):
     print(f"  Allowed through:           {semantic_allowed:>8,}")
     print(f"  Rate-limited (blocked):    {rl_count:>8,}  ({rl_pct:.1f}%)")
     print(f"  Infrastructure failures:   {infra_fails:>8,}")
+
+    # 30-second window breakdown
+    if _bucket_stats:
+        print(f"\n  {'30s WINDOW BREAKDOWN  (aggregate across all users)':^86}")
+        print("  " + "-" * 86)
+        print(f"  {'Window':<14} {'Start':>7} {'Allowed':>10} {'Blocked':>10} {'Block%':>8}  Note")
+        print("  " + "-" * 86)
+        spawn_end = RL_USERS / RL_SPAWN_RATE
+        for idx in sorted(_bucket_stats):
+            b = _bucket_stats[idx]
+            start_s = idx * 30
+            total_b = b["allowed"] + b["blocked"]
+            pct = (b["blocked"] / total_b * 100) if total_b > 0 else 0.0
+            note = ""
+            if start_s < spawn_end:
+                note = "ramp-up"
+            elif (start_s % 60) == 0 and start_s > 0:
+                note = "<-- window boundary"
+            print(f"  t={start_s:>4}-{start_s+30:<4}s  {start_s:>6}s {b['allowed']:>10,} {b['blocked']:>10,} {pct:>7.1f}%  {note}")
 
     # Gateway resource table
     gateways = sorted(
@@ -577,45 +683,66 @@ def on_test_stop(environment, **kwargs):
             print(f"  {'All gateways combined':<38} {total_mem_avg:>7.1f}M {total_mem_peak:>7.1f}M")
 
     # Redis memory timeline — the key comparison metric
-    if _redis_timeline:
-        print(f"\n  {'REDIS MEMORY TIMELINE  (polled every 10s)':^86}")
+    all_timeline = (([_redis_baseline] if _redis_baseline else []) + _redis_timeline)
+    if all_timeline:
+        print(f"\n  {'REDIS MEMORY TIMELINE  (polled every 5s)':^86}")
         print("  " + "-" * 86)
-        print(f"  {'Elapsed':>8} {'Active users':>14} {'Redis keys':>12} {'Redis mem':>12}  Note")
+        print(f"  {'Elapsed':>8} {'Active users':>14} {'RL keys':>10} {'Total keys':>11} {'Redis mem':>12}  Note")
         print("  " + "-" * 86)
 
         spawn_duration = RL_USERS / RL_SPAWN_RATE
-        for entry in _redis_timeline:
+        for entry in all_timeline:
             elapsed = entry["elapsed"]
             users = entry["users"]
-            keys = entry["keys"]
+            rl_keys = entry.get("rl_keys", entry.get("keys", 0))
+            total_keys = entry.get("total_keys", rl_keys)
             mem = entry["mem_mib"]
             note = ""
             if elapsed < 5:
-                note = "baseline (before users spawn)"
+                note = "← baseline (before users spawn)"
             elif elapsed <= spawn_duration + 5:
                 note = f"ramping up ({users}/{RL_USERS} users active)"
             elif elapsed > spawn_duration + 5:
                 note = "all users active — steady state"
-            print(f"  {elapsed:>7.0f}s {users:>14} {keys:>12,} {mem:>10.2f} MiB  {note}")
+            print(f"  {elapsed:>7.0f}s {users:>14} {rl_keys:>10,} {total_keys:>11,} {mem:>10.2f} MiB  {note}")
 
-        # Show the key insight: memory per user
-        if len(_redis_timeline) >= 2:
-            baseline = _redis_timeline[0]["mem_mib"]
-            peak = max(e["mem_mib"] for e in _redis_timeline)
-            peak_keys = max(e["keys"] for e in _redis_timeline)
-            delta = peak - baseline
-            per_key = (delta * 1024 / peak_keys) if peak_keys > 0 else 0
-            print("  " + "-" * 86)
-            print(f"  Baseline Redis mem:  {baseline:.2f} MiB")
-            print(f"  Peak Redis mem:      {peak:.2f} MiB  (+{delta:.2f} MiB above baseline)")
-            print(f"  Peak key count:      {peak_keys:,}")
-            if peak_keys > 0:
-                print(f"  Avg mem per key:     {per_key:.1f} KiB")
-                print(f"\n  Expected per-key cost by algorithm:")
-                print(f"    fixed_window:    ~0.1–0.3 KiB  (single integer + TTL)")
-                print(f"    sliding_window:  ~1–3 KiB      (sorted set, {RL_LIMIT_PER_MIN} float entries)")
-                print(f"    token_bucket:    ~0 KiB        (memory-only, no Redis keys)")
-                print(f"\n  Observed: {per_key:.1f} KiB/key  →  {'✅ matches fixed_window' if per_key < 0.5 else ('✅ matches sliding_window' if 0.5 <= per_key <= 5 else '⚠️  unexpected')}")
+        # Show the key insight: memory per RL key
+        # Use pre-bootstrap baseline for noise-floor, steady-state sample for peak.
+        # Math: delta_mem / delta_rl_keys from the SAME sample pair (not mixing max(mem) with max(keys)).
+        if len(all_timeline) >= 2:
+            baseline_entry = _redis_baseline if _redis_baseline else all_timeline[0]
+            baseline_mem = baseline_entry["mem_mib"]
+            baseline_rl_keys = baseline_entry.get("rl_keys", 0)
+
+            spawn_end = RL_USERS / RL_SPAWN_RATE
+            steady = [e for e in _redis_timeline if e["elapsed"] > spawn_end + 10]
+            if not steady:
+                steady = _redis_timeline[-min(3, len(_redis_timeline)):]
+
+            if steady:
+                # Pick the steady-state sample with the most RL keys (most representative)
+                best = max(steady, key=lambda e: e.get("rl_keys", 0))
+                delta_mem = best["mem_mib"] - baseline_mem
+                delta_rl_keys = best.get("rl_keys", 0) - baseline_rl_keys
+                per_key = (delta_mem * 1024 / delta_rl_keys) if delta_rl_keys > 0 else 0
+
+                print("  " + "-" * 86)
+                print(f"  Baseline Redis mem:  {baseline_mem:.2f} MiB  (pre-bootstrap, {baseline_rl_keys:,} RL keys)")
+                print(f"  Steady-state mem:    {best['mem_mib']:.2f} MiB  (+{delta_mem:.2f} MiB delta, {best.get('rl_keys', 0):,} RL keys)")
+                print(f"  RL key delta:        {delta_rl_keys:,}  (baseline-subtracted)")
+                if delta_rl_keys > 0:
+                    print(f"  Mem per RL key:      {per_key:.2f} KiB  (delta_mem / delta_keys — same sample)")
+                    print(f"\n  Expected per-key cost by algorithm:")
+                    print(f"    fixed_window:    ~0.1–0.3 KiB  (single integer + TTL)")
+                    print(f"    sliding_window:  ~1–3 KiB      (sorted set, {RL_LIMIT_PER_MIN} float entries)")
+                    print(f"    token_bucket:    ~0.2 KiB      (hash: tokens + last_refill)")
+                    if per_key < 0.5:
+                        verdict = "✅ consistent with fixed_window"
+                    elif per_key <= 5.0:
+                        verdict = "✅ consistent with sliding_window or token_bucket"
+                    else:
+                        verdict = "⚠️  higher than expected — investigate"
+                    print(f"\n  Observed: {per_key:.2f} KiB/key  →  {verdict}")
 
     # Latency
     if total_http > 0:
@@ -810,11 +937,16 @@ class ScaleComparisonUser(FastHttpUser):
                     return
 
                 result = data.get("result")
+                bucket = int((time.time() - _test_start_time) / 30)
                 if isinstance(result, dict) and result.get("isError"):
                     response.request_meta["name"] = "MCP tools/call [rate-limited]"
                     response.success()
+                    with _stats_lock:
+                        _bucket_stats[bucket]["blocked"] += 1
                 else:
                     response.request_meta["name"] = "MCP tools/call [allowed]"
                     response.success()
+                    with _stats_lock:
+                        _bucket_stats[bucket]["allowed"] += 1
         except Exception as exc:
             logger.warning("Request failed (tools/call): %s", exc)

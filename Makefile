@@ -2325,7 +2325,7 @@ MCP_RATE_LIMITER_ALGO_LOCUSTFILE ?= tests/loadtest/locustfile_rate_limiter_algor
 MCP_RATE_LIMITER_SCALE_LOCUSTFILE ?= tests/loadtest/locustfile_rate_limiter_scale.py
 RL_ALGORITHM ?= fixed_window
 RL_USERS ?= 100
-RL_SPAWN_RATE ?= 5
+RL_SPAWN_RATE ?= 10
 MCP_PROTOCOL_HOST ?= http://localhost:4444
 MCP_BENCHMARK_HOST ?= http://localhost:8080
 MCP_BENCHMARK_SERVER_ID ?= 9779b6698cbd4b4995ee04a4fab38737
@@ -2473,17 +2473,19 @@ benchmark-rate-limiter-algorithms:          ## Compare rate limiter algorithms (
 
 # help: benchmark-rate-limiter-scale  - Multi-user scale test showing Redis memory divergence across algorithms
 .PHONY: benchmark-rate-limiter-scale
-benchmark-rate-limiter-scale:               ## Scale test: 100 unique users, Redis memory timeline per algorithm
+RL_RUN_TIME ?= 300s
+benchmark-rate-limiter-scale:               ## Scale test: 500 unique users, Redis memory timeline per algorithm
 	@echo "📈 Running rate limiter scale test (resource divergence)..."
 	@echo "   Algorithm: $(RL_ALGORITHM)  (must match plugins/config.yaml)"
 	@echo "   Users:     $(RL_USERS) unique identities  (each creates own Redis key)"
 	@echo "   Spawn:     $(RL_SPAWN_RATE) users/s"
 	@echo "   Limit:     $(RL_LIMIT_PER_MIN) req/min per user"
+	@echo "   Duration:  $(RL_RUN_TIME)  (includes ~40s bootstrap for user registration)"
 	@echo ""
 	@echo "   Redis memory diverges between algorithms as users ramp up:"
 	@echo "     fixed_window:   ~0.1-0.3 KiB/key  (single integer)"
 	@echo "     sliding_window: ~1-3 KiB/key       (sorted set, $(RL_LIMIT_PER_MIN) entries)"
-	@echo "     token_bucket:   ~0 KiB             (memory-only, no Redis keys)"
+	@echo "     token_bucket:   ~0.2 KiB/key       (hash: tokens + last_refill)"
 	@test -d "$(VENV_DIR)" || $(MAKE) venv
 	@/bin/bash -eu -o pipefail -c 'source $(VENV_DIR)/bin/activate && \
 		LOCUST_LOG_LEVEL=ERROR \
@@ -2491,12 +2493,13 @@ benchmark-rate-limiter-scale:               ## Scale test: 100 unique users, Red
 		RL_LIMIT_PER_MIN=$(RL_LIMIT_PER_MIN) \
 		RL_USERS=$(RL_USERS) \
 		RL_SPAWN_RATE=$(RL_SPAWN_RATE) \
+		RL_RUN_TIME=$(RL_RUN_TIME) \
 		MCP_SERVER_ID=$(MCP_BENCHMARK_SERVER_ID) \
 		locust -f $(MCP_RATE_LIMITER_SCALE_LOCUSTFILE) \
 			--host=$(MCP_BENCHMARK_HOST) \
 			--users=$(RL_USERS) \
 			--spawn-rate=$(RL_SPAWN_RATE) \
-			--run-time=90s \
+			--run-time=$(RL_RUN_TIME) \
 			--headless \
 			--only-summary \
 			ScaleComparisonUser || true'
